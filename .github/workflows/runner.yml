@@ -534,8 +534,8 @@ jobs:
       EVENT_ACTION: ${{ github.event.action }}
       SESSION_ROLE: warm-promoted
     concurrency:
-      group: vps-shim-runner-standby
-      cancel-in-progress: true
+      group: vps-shim-runner-standby-${{ github.run_id }}
+      cancel-in-progress: false
     steps:
       - name: Record standby job start
         run: date +%s > /tmp/standby_job_start_epoch
@@ -698,7 +698,7 @@ jobs:
           }
           _standby_hb
           mkdir -p /home/runner/shim/repo/vps-shim/logs
-          SHIM_ROOT=/home/runner/shim nohup python3 /home/runner/shim/repo/vps-shim/scripts/store_sync.py prefetch --follow >> /home/runner/shim/repo/vps-shim/logs/store_sync.log 2>&1 &
+          SHIM_ROOT=/home/runner/shim nohup python3 /home/runner/shim/repo/vps-shim/scripts/store_sync.py prefetch --follow --apply >> /home/runner/shim/repo/vps-shim/logs/store_sync.log 2>&1 &
           _standby_hb
           while true; do
             if [ -f "$GO_FILE" ]; then
