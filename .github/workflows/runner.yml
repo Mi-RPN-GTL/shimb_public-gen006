@@ -169,7 +169,7 @@ env:
   # manual workflow_dispatch of `session` is ever used without a
   # standby cycle already primed (e.g. very first cold start).
   DOWNTIME_GAP_SECONDS: 600
-  STANDBY_DISPATCH_LEAD_SECONDS: 3000
+  STANDBY_DISPATCH_LEAD_SECONDS: 4500
   STANDBY_WAIT_CEILING_SECONDS: 18000
   DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
   # v113 fix: repository_dispatch only triggers workflows defined in
@@ -680,6 +680,7 @@ jobs:
           WAITED=0
           GO_FILE="/home/runner/shim/repo/vps-shim/state/go_standby.json"
           SPAWN_FROZEN_DONE=0
+          LAST_FREEZE_AT=0
           STANDBY_START_EPOCH=$(date +%s)
           LAST_STALE_LOGGED=""
           LAST_HB_AT=0
@@ -698,6 +699,8 @@ jobs:
           }
           _standby_hb
           mkdir -p /home/runner/shim/repo/vps-shim/logs
+          rm -f /home/runner/shim/sysbase_early
+          SHIM_ROOT=/home/runner/shim nohup bash -c 'python3 /home/runner/shim/repo/vps-shim/scripts/store_sync.py sysbase && date +%s > /home/runner/shim/sysbase_early' >> /home/runner/shim/repo/vps-shim/logs/store_sync.log 2>&1 &
           SHIM_ROOT=/home/runner/shim nohup python3 /home/runner/shim/repo/vps-shim/scripts/store_sync.py prefetch --follow --apply >> /home/runner/shim/repo/vps-shim/logs/store_sync.log 2>&1 &
           _standby_hb
           while true; do
@@ -730,8 +733,9 @@ jobs:
             if [ $((WAITED - LAST_HB_AT)) -ge 60 ]; then LAST_HB_AT=$WAITED; _standby_hb; _sdiag standby_wait_loop info "still waiting for go-file, waited=${WAITED}s"; fi
             if [ $((WAITED - LAST_PULL_AT)) -ge 60 ]; then LAST_PULL_AT=$WAITED; bash /home/runner/shim/repo/vps-shim/scripts/git_pull.sh --no-copy-back > /dev/null 2>&1 || true; fi
 
-            if [ "$SPAWN_FROZEN_DONE" -eq 0 ]; then
+            if [ "$SPAWN_FROZEN_DONE" -eq 0 ] || [ $((WAITED - LAST_FREEZE_AT)) -ge "${STANDBY_REFREEZE_SECONDS:-90}" ]; then
               SPAWN_FROZEN_DONE=1
+              LAST_FREEZE_AT=$WAITED
               cat > /tmp/freeze_spawn.py <<'PYEOF'
                   import os, sys
                   sys.path.insert(0, '/home/runner/shim/repo/vps-shim/telegram')
@@ -754,6 +758,8 @@ jobs:
                   spawned, failed = 0, 0
                   failed_recs = []
                   for rec in in_scope:
+                      if launched.replica_exists(rec['launch_id']):
+                          continue
                       try:
                           new_id, new_pid = launched.launch_frozen(
                               rec['cmd'], rec['cwd'],
@@ -784,6 +790,11 @@ jobs:
                           _hd.emit('standby_freeze_each', f'freeze-spawn raised for {rec.get("launch_id")}', side='standby', level='fail', error=str(e))
                   print(f'PHASE: freeze-spawn complete -- {spawned} spawned, {failed} failed, {len(in_scope)} total in-scope')
 
+                  seen_path = '/tmp/freeze_failed_notified'
+                  seen = set(open(seen_path).read().split()) if os.path.exists(seen_path) else set()
+                  failed_recs = [r for r in failed_recs if r['launch_id'] not in seen]
+                  with open(seen_path, 'a') as sf:
+                      sf.write(''.join(r['launch_id'] + chr(10) for r in failed_recs))
                   if failed_recs:
                       import notify
                       for rec in failed_recs:
@@ -798,7 +809,7 @@ jobs:
                   _hd.flush_trace()
           PYEOF
               sed -i 's/^        //' /tmp/freeze_spawn.py
-              python3 /tmp/freeze_spawn.py
+              python3 /tmp/freeze_spawn.py || true
             fi
 
             python3 /home/runner/shim/repo/vps-shim/telegram/resume_swapped.py "$GO_FILE" || true
