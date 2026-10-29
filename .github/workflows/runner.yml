@@ -253,75 +253,16 @@ jobs:
           PYEOF
           sed -i 's/^          //' /tmp/write_boot_progress.py
 
-      - name: Check test mode (skip disk cleanup if rapid-iterating)
-        id: testmode
-        # v237 (rapid-iteration speedup): Free disk space next
-        # (jlumbroso/free-disk-space@main) costs ~2 minutes on every
-        # single run, cold-start or warm handoff, test mode or not --
-        # it's a workflow-level `uses:` step with no path to
-        # test_mode.py's state, since nothing has been checked out
-        # yet at this point in the job. This step is the fix: read
-        # the same GH Contents API file test_mode.py itself reads
-        # (vps-shim/state/shim_test_mode.json), directly, with no
-        # repo checkout needed, and expose the result as this step's
-        # own output so "Free disk space" can gate on it via `if:`.
-        # Best-effort only, same reasoning as every other early-boot
-        # Contents-API read in this file (write_boot_progress.py,
-        # etc.) -- any failure (network blip, file genuinely absent
-        # on a true first-ever run) must resolve to "skip=false" (run
-        # disk cleanup as before), never to "skip=true" on an
-        # unconfirmed read; silently skipping real disk cleanup on a
-        # PRODUCTION run because a transient API call failed would be
-        # a much worse failure mode than the 2 minutes this step
-        # exists to save.
-        env:
-          GH_OWNER: ${{ github.repository_owner }}
-          PRIVATE_REPO_NAME: ${{ vars.PRIVATE_REPO_NAME }}
-          SHIM_PAT: ${{ secrets.SHIM_PAT }}
-        run: |
-          SKIP=$(python3 -c "
-          import json, os, urllib.request
-          owner = os.environ['GH_OWNER']
-          repo = os.environ['PRIVATE_REPO_NAME']
-          pat = os.environ['SHIM_PAT']
-          path = 'vps-shim/state/shim_test_mode.json'
-          url = f'https://api.github.com/repos/{owner}/{repo}/contents/{path}'
-          headers = {'Authorization': f'token {pat}', 'Accept': 'application/vnd.github.v3+json'}
-          try:
-              req = urllib.request.Request(url, headers=headers)
-              with urllib.request.urlopen(req, timeout=10) as resp:
-                  import base64
-                  data = json.load(resp)
-                  content = base64.b64decode(data['content']).decode('utf-8')
-              enabled = bool(json.loads(content).get('enabled', True))
-              print('true' if enabled else 'false')
-          except urllib.error.HTTPError as e:
-              # 404 == file confirmed absent == never configured ==
-              # test_mode.py's own documented default (True) -- see
-              # test_mode.py's is_test_mode_enabled() docstring for
-              # why a true first-ever read defaults to on.
-              print('true' if e.code == 404 else 'false')
-          except Exception:
-              print('false')
-          " 2>/tmp/testmode_check_err || echo false)
-          echo "skip_disk_cleanup=${SKIP}" >> "$GITHUB_OUTPUT"
-          if [ "$SKIP" = "true" ]; then
-            echo "test mode is on -- skipping disk cleanup (rapid iteration, not needed for a short compressed session)"
-          else
-            echo "test mode is off (or unconfirmed) -- running disk cleanup as normal"
-          fi
-
       - name: Free disk space
-        if: steps.testmode.outputs.skip_disk_cleanup != 'true'
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-          docker-images: true
+        continue-on-error: true
+        run: |
+          df -h / | tail -1 || true
+          for p in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup "$HOME/.ghcup" /usr/share/swift /usr/local/share/boost /opt/hostedtoolcache "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"; do
+            (sudo rm -rf "$p" || true) &
+          done
+          (docker image prune --all --force >/dev/null 2>&1 || true) &
+          wait || true
+          df -h / | tail -1 || true
 
       - name: Record session start
         id: start
@@ -576,56 +517,16 @@ jobs:
           PYEOF
           sed -i 's/^          //' /tmp/write_boot_progress.py
 
-      - name: Check test mode (skip disk cleanup if rapid-iterating)
-        id: testmode
-        # v237: standby's own copy of the session job's identical step
-        # -- see that step's own comment for full reasoning. Duplicated
-        # rather than factored out, matching how this file already
-        # duplicates every other session/standby setup step.
-        env:
-          GH_OWNER: ${{ github.repository_owner }}
-          PRIVATE_REPO_NAME: ${{ vars.PRIVATE_REPO_NAME }}
-          SHIM_PAT: ${{ secrets.SHIM_PAT }}
-        run: |
-          SKIP=$(python3 -c "
-          import json, os, urllib.request
-          owner = os.environ['GH_OWNER']
-          repo = os.environ['PRIVATE_REPO_NAME']
-          pat = os.environ['SHIM_PAT']
-          path = 'vps-shim/state/shim_test_mode.json'
-          url = f'https://api.github.com/repos/{owner}/{repo}/contents/{path}'
-          headers = {'Authorization': f'token {pat}', 'Accept': 'application/vnd.github.v3+json'}
-          try:
-              req = urllib.request.Request(url, headers=headers)
-              with urllib.request.urlopen(req, timeout=10) as resp:
-                  import base64
-                  data = json.load(resp)
-                  content = base64.b64decode(data['content']).decode('utf-8')
-              enabled = bool(json.loads(content).get('enabled', True))
-              print('true' if enabled else 'false')
-          except urllib.error.HTTPError as e:
-              print('true' if e.code == 404 else 'false')
-          except Exception:
-              print('false')
-          " 2>/tmp/testmode_check_err || echo false)
-          echo "skip_disk_cleanup=${SKIP}" >> "$GITHUB_OUTPUT"
-          if [ "$SKIP" = "true" ]; then
-            echo "test mode is on -- skipping disk cleanup (rapid iteration, not needed for a short compressed session)"
-          else
-            echo "test mode is off (or unconfirmed) -- running disk cleanup as normal"
-          fi
-
       - name: Free disk space
-        if: steps.testmode.outputs.skip_disk_cleanup != 'true'
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-          docker-images: true
+        continue-on-error: true
+        run: |
+          df -h / | tail -1 || true
+          for p in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup "$HOME/.ghcup" /usr/share/swift /usr/local/share/boost /opt/hostedtoolcache "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"; do
+            (sudo rm -rf "$p" || true) &
+          done
+          (docker image prune --all --force >/dev/null 2>&1 || true) &
+          wait || true
+          df -h / | tail -1 || true
 
       - name: Record boot progress (free disk space done)
         env:
